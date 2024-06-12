@@ -7,18 +7,28 @@
 from PIL import ImageFilter
 import random
 
+# class TwoCropsTransform:
+#     """Take two random crops of one image as the query and key."""
 
-class TwoCropsTransform:
-    """Take two random crops of one image as the query and key."""
+#     def __init__(self, base_transform):
+#         self.base_transform = base_transform
 
-    def __init__(self, base_transform):
+#     def __call__(self, x):
+#         q = self.base_transform(x)
+#         k = self.base_transform(x)
+#         return [q, k]
+    
+class TwoSetsTransform:
+    """Take two sets (each containing 10 images) of random crops of one image as the query and key sets."""
+
+    def __init__(self, base_transform, set_size=10):
         self.base_transform = base_transform
+        self.set_size = set_size
 
     def __call__(self, x):
-        q = self.base_transform(x)
-        k = self.base_transform(x)
-        return [q, k]
-
+        set1 = [self.base_transform(x) for _ in range(self.set_size)]
+        set2 = [self.base_transform(x) for _ in range(self.set_size)]
+        return [set1, set2]
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
