@@ -12,7 +12,6 @@ import os
 import random
 import shutil
 import time
-import warnings
 
 import torch
 import torch.nn as nn
@@ -29,6 +28,14 @@ import torchvision.models as models
 
 import simsiam.loader
 import simsiam.builder
+
+from simsiam.loader import GaussianBlur
+from simsiam.loader import TwoSetsTransform
+
+import warnings
+warnings.filterwarnings("ignore", message="Failed to load image Python extension")
+warnings.filterwarnings("ignore", message="torch.distributed._all_gather_base is a private function and will be deprecated. Please use torch.distributed.all_gather_into_tensor instead.")
+
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -48,7 +55,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=512, type=int,
+parser.add_argument('-b', '--batch-size', default=152, type=int,
                     metavar='N',
                     help='mini-batch size (default: 512), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -135,6 +142,7 @@ def main_worker(gpu, ngpus_per_node, args):
         builtins.print = print_pass
 
     if args.gpu is not None:
+        print() # cleaning up the terminal output
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
@@ -222,25 +230,29 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     traindir = os.path.join(args.data, 'train')
+    
+    # Define the transformation to be applied to the images    
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-
-    # MoCo v2's aug: similar to SimCLR https://arxiv.org/abs/2002.05709
-    augmentation = [
+    
+    # set-to-set augmentation 
+    augmentation = transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
         transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
         ], p=0.8),
         transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([simsiam.loader.GaussianBlur([.1, 2.])], p=0.5),
+        transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize
-    ]
+    ])
+
+    transform = TwoSetsTransform(augmentation, set_size=10)
 
     train_dataset = datasets.ImageFolder(
         traindir,
-        simsiam.loader.TwoCropsTransform(transforms.Compose(augmentation)))
+        transform=transform) # reworked for set-to-set loss
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -257,7 +269,7 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        epoch_loss = train(train_loader, model, criterion, optimizer, epoch, args)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -267,7 +279,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
             }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
-
+            
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -282,19 +294,30 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     model.train()
 
     end = time.time()
-    for i, (images, _) in enumerate(train_loader):
+    for i, ((images_set1, images_set2), labels) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            # Move both sets directly to the GPU if they are tensors
+            if isinstance(images_set1, torch.Tensor):
+                images_set1 = images_set1.cuda(args.gpu, non_blocking=True)
+            if isinstance(images_set2, torch.Tensor):
+                images_set2 = images_set2.cuda(args.gpu, non_blocking=True)
 
-        # compute output and loss
-        p1, p2, z1, z2 = model(x1=images[0], x2=images[1])
-        loss = -(criterion(p1, z2).mean() + criterion(p2, z1).mean()) * 0.5
+        # Flatten
+        images_set1 = images_set1.view(-1, *images_set1.shape[2:])  # Reshape from [32, 10, 3, 224, 224] to [320, 3, 224, 224]
+        images_set2 = images_set2.view(-1, *images_set2.shape[2:])  # Reshape from [32, 10, 3, 224, 224] to [320, 3, 224, 224]
 
-        losses.update(loss.item(), images[0].size(0))
+        # Process images_set1 and images_set2 with the model
+        z1_set1 = model.module.encoder(images_set1)
+        z1_set2 = model.module.encoder(images_set2)
+
+        # Compute loss
+        loss = compute_set_to_set_loss(z1_set1, z1_set2)
+
+        # Update loss meter
+        losses.update(loss.item(), images_set1.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -307,13 +330,34 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
-
+            
+def compute_set_to_set_loss(set1, set2):
+    """
+    Compute the set-to-set loss by comparing feature matrices of two sets.
+    """
+    assert len(set1) == len(set2), "Sets must have the same size"
+    
+    for features1, features2 in zip(set1, set2):
+        # compute the pairwise cosine similarity between feature vectors
+        cos_sim = torch.nn.functional.cosine_similarity(features1, features2, dim=-1)
+        # compute the loss for each pair of feature vectors
+        loss = 1 - cos_sim
+    
+    return loss
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
-    if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+    checkpoint_dir = "./checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure directory exists
 
+    # Full path for the checkpoint
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
+
+    # Save the checkpoint
+    torch.save(state, checkpoint_path)
+
+    # If this is the best model, save it as 'model_best.pth.tar'
+    if is_best:
+        shutil.copyfile(checkpoint_path, os.path.join(checkpoint_dir, 'model_best.pth.tar'))
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
