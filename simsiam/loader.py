@@ -6,18 +6,8 @@
 
 from PIL import ImageFilter
 import random
-
-# class TwoCropsTransform:
-#     """Take two random crops of one image as the query and key."""
-
-#     def __init__(self, base_transform):
-#         self.base_transform = base_transform
-
-#     def __call__(self, x):
-#         q = self.base_transform(x)
-#         k = self.base_transform(x)
-#         return [q, k]
-    
+import torch
+   
 class TwoSetsTransform:
     """Take two sets (each containing 10 images) of random crops of one image as the query and key sets."""
 
@@ -26,8 +16,8 @@ class TwoSetsTransform:
         self.set_size = set_size
 
     def __call__(self, x):
-        set1 = [self.base_transform(x) for _ in range(self.set_size)]
-        set2 = [self.base_transform(x) for _ in range(self.set_size)]
+        set1 = torch.stack([self.base_transform(x) for _ in range(self.set_size)])
+        set2 = torch.stack([self.base_transform(x) for _ in range(self.set_size)])
         return [set1, set2]
 
 class GaussianBlur(object):
