@@ -365,10 +365,8 @@ def compute_set_to_set_loss(set1, set2):
     b2 = 1.0
 
     gumbel_sim = set_similarity(set1_norm, set2_norm, a1, a2, b1, b2)
-    
-    gumbel_sim_positive_inverse = (1 - (-1 * gumbel_sim))
 
-    return gumbel_sim_positive_inverse # return the loss
+    return gumbel_sim # return the loss
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     checkpoint_dir = "./checkpoints"
