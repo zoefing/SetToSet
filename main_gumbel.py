@@ -368,6 +368,23 @@ def compute_set_to_set_loss(set1, set2):
 
     return gumbel_sim # return the loss
 
+def distance_matrix(X1, X2):
+    distances = torch.cdist(X1, X2, p=2)
+    return distances
+
+def gumbel_fit(dis, a, b):
+    min_values = dis.values if isinstance(dis, torch.return_types.min) else dis
+    min_dis = a * min_values ** b
+    t = torch.exp(torch.log(min_dis))
+    sim = torch.mean(-t * torch.exp(-t))
+    return sim
+
+def set_similarity(X1, X2, a1, a2, b1, b2):
+    D = distance_matrix(X1, X2)
+    sim0 = gumbel_fit(D.min(0), a1, b1)
+    sim1 = gumbel_fit(D.min(1), a2, b2)
+    return sim0 + sim1
+
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     checkpoint_dir = "./checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure directory exists
@@ -429,23 +446,6 @@ def adjust_learning_rate(optimizer, init_lr, epoch, args):
             param_group['lr'] = init_lr
         else:
             param_group['lr'] = cur_lr
-
-def distance_matrix(X1, X2):
-    distances = torch.cdist(X1, X2, p=2)
-    return distances
-
-def gumbel_fit(dis, a, b):
-    min_values = dis.values if isinstance(dis, torch.return_types.min) else dis
-    min_dis = a * min_values ** b
-    t = torch.exp(torch.log(min_dis))
-    sim = torch.mean(-t * torch.exp(-t))
-    return sim
-
-def set_similarity(X1, X2, a1, a2, b1, b2):
-    D = distance_matrix(X1, X2)
-    sim0 = gumbel_fit(D.min(0), a1, b1)
-    sim1 = gumbel_fit(D.min(1), a2, b2)
-    return sim0 + sim1
         
 if __name__ == '__main__':
     main()
